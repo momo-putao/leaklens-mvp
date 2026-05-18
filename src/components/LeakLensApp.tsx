@@ -2,11 +2,13 @@
 
 import {
   AlertTriangle,
+  BarChart3,
   BookOpenCheck,
   BriefcaseBusiness,
   CheckCircle2,
   ClipboardCheck,
   Database,
+  Download,
   FileText,
   Gauge,
   Library,
@@ -22,7 +24,9 @@ import {
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import {
   analyzeDocument,
+  documentTypes,
   generateTrainingCases,
+  recipientTypes,
   riskLevelLabel,
   rewriteModes,
   sampleTexts,
@@ -30,9 +34,10 @@ import {
 } from "@/lib/riskEngine";
 import { createKnowledgeItem } from "@/lib/knowledgeBase";
 import { loadKnowledgeBase, loadReviews, saveKnowledgeBase, saveReviews } from "@/lib/storage";
-import { DocumentReview, KnowledgeItem, KnowledgeType, RewriteMode, RiskTag, ReviewScenario } from "@/lib/types";
+import { DocumentReview, DocumentType, KnowledgeItem, KnowledgeType, RecipientType, RewriteMode, RiskTag, ReviewScenario } from "@/lib/types";
 
 const navigation = [
+  { id: "dashboard", label: "态势看板", icon: BarChart3 },
   { id: "workbench", label: "风险审查", icon: Search },
   { id: "rewrite", label: "脱敏改写", icon: WandSparkles },
   { id: "approval", label: "审批留痕", icon: ClipboardCheck },
@@ -65,6 +70,64 @@ function formatDate(value: string) {
     hour: "2-digit",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function reviewSummary(review: DocumentReview) {
+  return (
+    review.summary ?? {
+      exposure: review.riskLevel === "high" ? "高外部扩散" : review.riskLevel === "medium" ? "有限外部披露" : "内部可控",
+      confidence: review.citations?.length ? 82 : 66,
+      decision: review.riskLevel === "high" ? "禁止外发" : review.riskLevel === "medium" ? "修改后外发" : "可外发",
+      nextBestAction: review.recommendation
+    }
+  );
+}
+
+function downloadReviewReport(review: DocumentReview) {
+  const summary = reviewSummary(review);
+  const body = [
+    `# LeakLens 审查报告`,
+    ``,
+    `材料：${review.title}`,
+    `场景：${review.scenario}`,
+    `材料类型：${review.documentType ?? "未记录"}`,
+    `接收方：${review.recipientType ?? "未记录"}`,
+    `提交人：${review.submitter}`,
+    `部门：${review.department}`,
+    `风险等级：${riskLevelLabel(review.riskLevel)} (${review.score})`,
+    `最终决策：${summary.decision}`,
+    `外部扩散：${summary.exposure}`,
+    `可信度：${summary.confidence}%`,
+    ``,
+    `## 下一步动作`,
+    summary.nextBestAction,
+    ``,
+    `## 风险发现`,
+    ...(review.findings.length
+      ? review.findings.map((finding, index) => `${index + 1}. ${finding.tag}：${finding.reason}\n   片段：${finding.snippet}\n   动作：${finding.action}`)
+      : ["未发现明显敏感片段。"]),
+    ``,
+    `## 引用依据`,
+    ...((review.citations ?? []).length
+      ? (review.citations ?? []).map((citation, index) => `${index + 1}. ${citation.title}｜${citation.source}\n   ${citation.excerpt}`)
+      : ["未命中知识库依据。"]),
+    ``,
+    `## 整改任务`,
+    ...((review.remediationTasks ?? []).length
+      ? (review.remediationTasks ?? []).map((task, index) => `${index + 1}. [${task.priority}] ${task.owner}：${task.action}（${task.due}）`)
+      : ["暂无整改任务。"]),
+    ``,
+    `## 脱敏版本`,
+    review.sanitizedVersions[0]?.text ?? "暂无"
+  ].join("\n");
+
+  const blob = new Blob([body], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${review.title || "leaklens-review"}.md`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function HighlightedText({ review }: { review: DocumentReview }) {
@@ -133,6 +196,8 @@ export function LeakLensApp() {
   const [title, setTitle] = useState("客户沟通材料审查");
   const [text, setText] = useState(sampleTexts[1].text);
   const [scenario, setScenario] = useState<ReviewScenario>("客户沟通");
+  const [documentType, setDocumentType] = useState<DocumentType>("邮件正文");
+  const [recipientType, setRecipientType] = useState<RecipientType>("客户");
   const [mode, setMode] = useState<RewriteMode>("平衡表达");
   const [submitter, setSubmitter] = useState("销售部 李明");
   const [department, setDepartment] = useState("销售一部");
@@ -191,6 +256,8 @@ export function LeakLensApp() {
       title,
       originalText: text,
       scenario,
+      documentType,
+      recipientType,
       submitter,
       department,
       mode,
@@ -234,6 +301,8 @@ export function LeakLensApp() {
       title: selectedReview.title,
       originalText: selectedReview.originalText,
       scenario: selectedReview.scenario,
+      documentType: selectedReview.documentType ?? "邮件正文",
+      recipientType: selectedReview.recipientType ?? "客户",
       submitter: selectedReview.submitter,
       department: selectedReview.department,
       mode: newMode,
@@ -325,6 +394,8 @@ export function LeakLensApp() {
             </div>
           </header>
 
+          {tab === "dashboard" && <DashboardPanel reviews={reviews} />}
+
           {tab === "workbench" && (
             <section className="grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(420px,0.95fr)]">
               <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
@@ -357,6 +428,30 @@ export function LeakLensApp() {
                       onChange={(event) => setScenario(event.target.value as ReviewScenario)}
                     >
                       {scenarios.map((item) => (
+                        <option key={item}>{item}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="grid gap-2 text-sm font-medium text-slate-700">
+                    材料类型
+                    <select
+                      className="focus-ring h-11 rounded-md border border-line bg-white px-3 text-sm"
+                      value={documentType}
+                      onChange={(event) => setDocumentType(event.target.value as DocumentType)}
+                    >
+                      {documentTypes.map((item) => (
+                        <option key={item}>{item}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="grid gap-2 text-sm font-medium text-slate-700">
+                    接收方
+                    <select
+                      className="focus-ring h-11 rounded-md border border-line bg-white px-3 text-sm"
+                      value={recipientType}
+                      onChange={(event) => setRecipientType(event.target.value as RecipientType)}
+                    >
+                      {recipientTypes.map((item) => (
                         <option key={item}>{item}</option>
                       ))}
                     </select>
@@ -471,6 +566,106 @@ function EmptyState() {
   );
 }
 
+function DashboardPanel({ reviews }: { reviews: DocumentReview[] }) {
+  const departments = Object.entries(
+    reviews.reduce<Record<string, { total: number; high: number }>>((acc, review) => {
+      const key = review.department || "未归属";
+      acc[key] = acc[key] ?? { total: 0, high: 0 };
+      acc[key].total += 1;
+      if (review.riskLevel === "high") acc[key].high += 1;
+      return acc;
+    }, {})
+  )
+    .sort((a, b) => b[1].high - a[1].high || b[1].total - a[1].total)
+    .slice(0, 5);
+
+  const tagStats = Object.entries(
+    reviews.flatMap((review) => review.tags).reduce<Record<string, number>>((acc, tag) => {
+      acc[tag] = (acc[tag] ?? 0) + 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b[1] - a[1]);
+
+  const blocked = reviews.filter((review) => review.status === "已拦截").length;
+  const avgScore = reviews.length ? Math.round(reviews.reduce((sum, review) => sum + review.score, 0) / reviews.length) : 0;
+  const highExternal = reviews.filter((review) => review.riskLevel === "high" && reviewSummary(review).exposure === "高外部扩散");
+
+  return (
+    <section className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-4">
+        <MetricCard label="审查总量" value={`${reviews.length}`} icon={FileText} tone="bg-sky-50 text-sky-700" />
+        <MetricCard label="平均风险分" value={`${avgScore}`} icon={Gauge} tone="bg-amber-50 text-amber-700" />
+        <MetricCard label="已拦截" value={`${blocked}`} icon={ShieldCheck} tone="bg-red-50 text-red-700" />
+        <MetricCard label="高扩散风险" value={`${highExternal.length}`} icon={AlertTriangle} tone="bg-purple-50 text-purple-700" />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
+        <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+          <h2 className="text-lg font-semibold">部门风险排行</h2>
+          <div className="mt-4 grid gap-3">
+            {departments.length ? (
+              departments.map(([department, stat]) => (
+                <div key={department} className="rounded-lg border border-line bg-panel p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="font-semibold">{department}</div>
+                    <div className="text-sm text-slate-500">
+                      高风险 {stat.high} / 总量 {stat.total}
+                    </div>
+                  </div>
+                  <div className="mt-3 h-2 rounded-full bg-white">
+                    <div className="h-2 rounded-full bg-brand" style={{ width: `${Math.min(100, (stat.high / Math.max(1, stat.total)) * 100)}%` }} />
+                  </div>
+                </div>
+              ))
+            ) : (
+              <EmptyState />
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+          <h2 className="text-lg font-semibold">高频风险标签</h2>
+          <div className="mt-4 grid gap-3">
+            {tagStats.length ? (
+              tagStats.map(([tag, count]) => (
+                <div key={tag} className="flex items-center justify-between gap-3 rounded-lg border border-line bg-panel p-3">
+                  <span className={`rounded-full border px-3 py-1 text-xs font-semibold ${tagColor[tag as RiskTag]}`}>{tag}</span>
+                  <span className="text-sm font-semibold">{count} 次</span>
+                </div>
+              ))
+            ) : (
+              <EmptyState />
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+        <h2 className="text-lg font-semibold">重点关注队列</h2>
+        <div className="mt-4 grid gap-3">
+          {reviews.filter((review) => review.riskLevel !== "low").slice(0, 6).map((review) => (
+            <div key={review.id} className="rounded-lg border border-line bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="font-semibold">{review.title}</div>
+                  <div className="mt-1 text-sm text-slate-500">
+                    {review.department} · {review.documentType ?? "邮件正文"} · {review.recipientType ?? "客户"}
+                  </div>
+                </div>
+                <span className={`rounded-md border px-3 py-1 text-xs font-semibold ${levelStyles[review.riskLevel]}`}>
+                  {riskLevelLabel(review.riskLevel)} · {reviewSummary(review).decision}
+                </span>
+              </div>
+              <p className="mt-3 text-sm leading-6 text-slate-700">{reviewSummary(review).nextBestAction}</p>
+            </div>
+          ))}
+          {!reviews.some((review) => review.riskLevel !== "low") && <EmptyState />}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ResultPanel({
   review,
   onGenerateTraining
@@ -479,6 +674,7 @@ function ResultPanel({
   onGenerateTraining: () => void;
 }) {
   if (!review) return <EmptyState />;
+  const summary = reviewSummary(review);
 
   return (
     <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
@@ -489,9 +685,45 @@ function ResultPanel({
             {review.submitter} · {review.scenario} · {formatDate(review.createdAt)}
           </p>
         </div>
-        <span className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${levelStyles[review.riskLevel]}`}>
-          {riskLevelLabel(review.riskLevel)} · {review.score}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => downloadReviewReport(review)}
+            className="focus-ring inline-flex h-9 items-center gap-2 rounded-md border border-line bg-panel px-3 text-xs font-semibold text-slate-700 hover:bg-white"
+          >
+            <Download size={15} />
+            下载报告
+          </button>
+          <span className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${levelStyles[review.riskLevel]}`}>
+            {riskLevelLabel(review.riskLevel)} · {review.score}
+          </span>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        <div className="rounded-lg border border-line bg-panel p-3">
+          <div className="text-xs font-medium text-slate-500">最终决策</div>
+          <div className="mt-2 text-lg font-semibold text-ink">{summary.decision}</div>
+        </div>
+        <div className="rounded-lg border border-line bg-panel p-3">
+          <div className="text-xs font-medium text-slate-500">外部扩散</div>
+          <div className="mt-2 text-lg font-semibold text-ink">{summary.exposure}</div>
+        </div>
+        <div className="rounded-lg border border-line bg-panel p-3">
+          <div className="text-xs font-medium text-slate-500">判断可信度</div>
+          <div className="mt-2 text-lg font-semibold text-ink">{summary.confidence}%</div>
+        </div>
+        <div className="rounded-lg border border-line bg-panel p-3">
+          <div className="text-xs font-medium text-slate-500">材料画像</div>
+          <div className="mt-2 text-sm font-semibold text-ink">
+            {review.documentType ?? "邮件正文"} / {review.recipientType ?? "客户"}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-brand/25 bg-emerald-50 p-4">
+        <div className="text-sm font-semibold text-emerald-950">下一步最优动作</div>
+        <p className="mt-2 text-sm leading-6 text-emerald-900">{summary.nextBestAction}</p>
       </div>
 
       <div className="mt-5 rounded-lg border border-line bg-panel p-4">
@@ -580,6 +812,25 @@ function ResultPanel({
             <BookOpenCheck size={15} />
             生成培训题
           </button>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-lg border border-line bg-white p-4">
+        <div className="text-sm font-semibold">整改任务</div>
+        <div className="mt-3 grid gap-2">
+          {(review.remediationTasks ?? []).map((task) => (
+            <div key={task.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-line bg-panel p-3">
+              <div>
+                <div className="text-sm font-semibold">
+                  {task.priority} · {task.owner}
+                </div>
+                <p className="mt-1 text-sm leading-6 text-slate-700">{task.action}</p>
+              </div>
+              <span className="rounded bg-white px-2.5 py-1 text-xs font-medium text-slate-600">
+                {task.due} · {task.status}
+              </span>
+            </div>
+          ))}
         </div>
       </div>
     </div>

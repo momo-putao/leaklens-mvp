@@ -1,10 +1,14 @@
 import {
   ApprovalRecord,
+  DocumentType,
   DocumentReview,
   KnowledgeItem,
   LegalCitation,
+  RecipientType,
+  RemediationTask,
   RewriteMode,
   RiskFinding,
+  RiskSummary,
   RiskLevel,
   RiskTag,
   ReviewScenario,
@@ -29,6 +33,10 @@ export const scenarios: ReviewScenario[] = [
 ];
 
 export const rewriteModes: RewriteMode[] = ["保守脱敏", "平衡表达", "保留商务语气"];
+
+export const recipientTypes: RecipientType[] = ["内部同事", "客户", "供应商", "合作伙伴", "公众渠道"];
+
+export const documentTypes: DocumentType[] = ["邮件正文", "合同条款", "报价文件", "宣传文案", "技术方案", "投标材料", "会议纪要"];
 
 export const sampleTexts = [
   {
@@ -138,6 +146,100 @@ function approvalForLevel(level: RiskLevel): ApprovalRecord {
     handler: "系统风控引擎",
     createdAt: now()
   };
+}
+
+function contextBonus(recipientType: RecipientType, documentType: DocumentType) {
+  const recipient: Record<RecipientType, number> = {
+    内部同事: 0,
+    客户: 8,
+    供应商: 10,
+    合作伙伴: 12,
+    公众渠道: 18
+  };
+  const document: Record<DocumentType, number> = {
+    邮件正文: 2,
+    合同条款: 6,
+    报价文件: 14,
+    宣传文案: 8,
+    技术方案: 14,
+    投标材料: 16,
+    会议纪要: 6
+  };
+
+  return recipient[recipientType] + document[documentType];
+}
+
+function buildSummary(level: RiskLevel, score: number, recipientType: RecipientType, citations: LegalCitation[]): RiskSummary {
+  const external = recipientType === "公众渠道" || recipientType === "合作伙伴" || recipientType === "供应商";
+  const exposure = !external ? "内部可控" : recipientType === "公众渠道" ? "高外部扩散" : "有限外部披露";
+  const confidence = Math.min(96, 62 + citations.length * 7 + (score > 70 ? 12 : score > 35 ? 6 : 0));
+
+  if (level === "high") {
+    return {
+      exposure,
+      confidence,
+      decision: "禁止外发",
+      nextBestAction: "先生成脱敏版本，补充披露必要性说明，并提交法务复核。"
+    };
+  }
+
+  if (level === "medium") {
+    return {
+      exposure,
+      confidence,
+      decision: "修改后外发",
+      nextBestAction: "删除具体敏感片段，保留概括性业务目的，并完成审批留痕。"
+    };
+  }
+
+  return {
+    exposure,
+    confidence,
+    decision: "可外发",
+    nextBestAction: "保留本次审查记录，按普通外发流程处理。"
+  };
+}
+
+function createRemediationTasks(
+  level: RiskLevel,
+  findings: RiskFinding[],
+  department: string,
+  citations: LegalCitation[]
+): RemediationTask[] {
+  if (!findings.length) {
+    return [
+      {
+        id: makeId("task"),
+        owner: department || "业务部门",
+        action: "保留审查记录，并确认外发对象与沟通目的无异常。",
+        due: "今日",
+        status: "待处理",
+        priority: "P2"
+      }
+    ];
+  }
+
+  const tasks: RemediationTask[] = findings.slice(0, 4).map((finding, index) => ({
+    id: makeId("task"),
+    owner: index === 0 ? department || "业务部门" : "法务合规",
+    action: `${finding.tag}：${finding.action}`,
+    due: level === "high" ? "今日" : "2 个工作日内",
+    status: "待处理",
+    priority: level === "high" ? "P0" : "P1"
+  }));
+
+  if (citations.some((item) => item.type === "合同条款")) {
+    tasks.push({
+      id: makeId("task"),
+      owner: "法务合规",
+      action: "核对 NDA 或合同保密条款，确认接收方、披露目的和书面授权范围。",
+      due: "今日",
+      status: "待处理",
+      priority: level === "high" ? "P0" : "P1"
+    });
+  }
+
+  return tasks;
 }
 
 function retrieveCitations(text: string, tags: RiskTag[], knowledgeBase: KnowledgeItem[]): LegalCitation[] {
@@ -253,6 +355,8 @@ export function analyzeDocument(params: {
   title: string;
   originalText: string;
   scenario: ReviewScenario;
+  documentType: DocumentType;
+  recipientType: RecipientType;
   submitter: string;
   department: string;
   mode: RewriteMode;
@@ -267,10 +371,21 @@ export function analyzeDocument(params: {
     return sum + (rule?.weight ?? 10);
   }, 0);
   const scenarioBonus = params.scenario === "员工外发" || params.scenario === "客户沟通" ? 8 : 4;
-  const score = Math.min(100, findings.length ? baseScore + scenarioBonus + findings.length * 4 + citationScore(citations, knowledgeBase) : 12);
+  const score = Math.min(
+    100,
+    findings.length
+      ? baseScore +
+          scenarioBonus +
+          contextBonus(params.recipientType, params.documentType) +
+          findings.length * 4 +
+          citationScore(citations, knowledgeBase)
+      : Math.max(8, contextBonus(params.recipientType, params.documentType))
+  );
   const riskLevel = levelFromScore(score);
   const approval = approvalForLevel(riskLevel);
   const sanitized = sanitize(params.originalText, params.mode, findings);
+  const summary = buildSummary(riskLevel, score, params.recipientType, citations);
+  const remediationTasks = createRemediationTasks(riskLevel, findings, params.department, citations);
 
   const status: DocumentReview["status"] =
     approval.status === "自动通过" ? "已通过" : approval.status === "法务复核" ? "待复核" : "已拦截";
@@ -280,10 +395,13 @@ export function analyzeDocument(params: {
     title: params.title || "未命名审查材料",
     originalText: params.originalText,
     scenario: params.scenario,
+    documentType: params.documentType,
+    recipientType: params.recipientType,
     submitter: params.submitter || "业务提交人",
     department: params.department || "业务部门",
     riskLevel,
     score,
+    summary,
     status,
     tags,
     findings,
@@ -292,6 +410,7 @@ export function analyzeDocument(params: {
     recommendation: approval.suggestion,
     sanitizedVersions: [sanitized],
     approvalRecords: [approval],
+    remediationTasks,
     trainingCases: [],
     createdAt: now()
   };
