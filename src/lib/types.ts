@@ -97,6 +97,23 @@ export type RiskSummary = {
   nextBestAction: string;
 };
 
+export type ParsedDocumentBlock = {
+  id: string;
+  source: string;
+  text: string;
+};
+
+export type ParsedDocument = {
+  id: string;
+  fileName: string;
+  fileType: string;
+  text: string;
+  blocks: ParsedDocumentBlock[];
+  createdAt: string;
+};
+
+export type ModelStatus = "ai_generated" | "rule_fallback" | "ai_error_fallback";
+
 export type DocumentReview = {
   id: string;
   title: string;
@@ -115,6 +132,10 @@ export type DocumentReview = {
   legalBasis: string;
   citations: LegalCitation[];
   recommendation: string;
+  modelStatus?: ModelStatus;
+  sourceFileName?: string;
+  sourceFileType?: string;
+  auditSerial?: string;
   sanitizedVersions: SanitizedVersion[];
   approvalRecords: ApprovalRecord[];
   remediationTasks: RemediationTask[];

@@ -9,14 +9,17 @@ import {
   ClipboardCheck,
   Database,
   Download,
+  FileInput,
   FileText,
   Gauge,
   Library,
   LockKeyhole,
   Plus,
+  Plug,
   Search,
   ShieldCheck,
   Sparkles,
+  ScrollText,
   Trash2,
   Upload,
   WandSparkles
@@ -34,7 +37,7 @@ import {
 } from "@/lib/riskEngine";
 import { createKnowledgeItem } from "@/lib/knowledgeBase";
 import { loadKnowledgeBase, loadReviews, saveKnowledgeBase, saveReviews } from "@/lib/storage";
-import { DocumentReview, DocumentType, KnowledgeItem, KnowledgeType, RecipientType, RewriteMode, RiskTag, ReviewScenario } from "@/lib/types";
+import { DocumentReview, DocumentType, KnowledgeItem, KnowledgeType, ParsedDocument, RecipientType, RewriteMode, RiskTag, ReviewScenario } from "@/lib/types";
 
 const navigation = [
   { id: "dashboard", label: "态势看板", icon: BarChart3 },
@@ -43,7 +46,10 @@ const navigation = [
   { id: "approval", label: "审批留痕", icon: ClipboardCheck },
   { id: "cases", label: "案例库", icon: Database },
   { id: "training", label: "培训题库", icon: BookOpenCheck },
-  { id: "knowledge", label: "知识库", icon: Library }
+  { id: "knowledge", label: "知识库", icon: Library },
+  { id: "import", label: "资料导入", icon: FileInput },
+  { id: "audit", label: "审计日志", icon: ScrollText },
+  { id: "integrations", label: "系统集成", icon: Plug }
 ] as const;
 
 type TabId = (typeof navigation)[number]["id"];
@@ -192,6 +198,7 @@ export function LeakLensApp() {
   const [tab, setTab] = useState<TabId>("workbench");
   const [reviews, setReviews] = useState<DocumentReview[]>([]);
   const [knowledgeBase, setKnowledgeBase] = useState<KnowledgeItem[]>([]);
+  const [auditLogs, setAuditLogs] = useState<Array<Record<string, unknown>>>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [title, setTitle] = useState("客户沟通材料审查");
   const [text, setText] = useState(sampleTexts[1].text);
@@ -202,13 +209,35 @@ export function LeakLensApp() {
   const [submitter, setSubmitter] = useState("销售部 李明");
   const [department, setDepartment] = useState("销售一部");
   const [filter, setFilter] = useState("全部");
+  const [parsedDocument, setParsedDocument] = useState<ParsedDocument | null>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    const loaded = loadReviews();
-    setReviews(loaded);
-    setSelectedId(loaded[0]?.id ?? "");
-    setKnowledgeBase(loadKnowledgeBase());
+    async function hydrate() {
+      try {
+        const [reviewsResponse, knowledgeResponse, auditResponse] = await Promise.all([
+          fetch("/api/reviews"),
+          fetch("/api/knowledge"),
+          fetch("/api/audit")
+        ]);
+        const reviewsData = await reviewsResponse.json();
+        const knowledgeData = await knowledgeResponse.json();
+        const auditData = await auditResponse.json();
+        const loadedReviews = reviewsData.reviews ?? loadReviews();
+        setReviews(loadedReviews);
+        setSelectedId(loadedReviews[0]?.id ?? "");
+        setKnowledgeBase(knowledgeData.knowledge ?? loadKnowledgeBase());
+        setAuditLogs(auditData.auditLogs ?? []);
+      } catch {
+        const loaded = loadReviews();
+        setReviews(loaded);
+        setSelectedId(loaded[0]?.id ?? "");
+        setKnowledgeBase(loadKnowledgeBase());
+      }
+    }
+
+    hydrate();
   }, []);
 
   useEffect(() => {
@@ -245,45 +274,94 @@ export function LeakLensApp() {
     return reviews.filter((review) => review.tags.includes(filter as RiskTag));
   }, [filter, reviews]);
 
-  function handleAnalyze() {
+  async function refreshAuditLogs() {
+    try {
+      const response = await fetch("/api/audit");
+      const data = await response.json();
+      setAuditLogs(data.auditLogs ?? []);
+    } catch {
+      setAuditLogs([]);
+    }
+  }
+
+  async function handleAnalyze() {
     if (text.trim().length < 8) {
       setError("请输入至少 8 个字符的审查文本。");
       return;
     }
 
     setError("");
-    const review = analyzeDocument({
-      title,
-      originalText: text,
-      scenario,
-      documentType,
-      recipientType,
-      submitter,
-      department,
-      mode,
-      knowledgeBase
-    });
-
-    setReviews((current) => [review, ...current]);
-    setSelectedId(review.id);
+    setLoading(true);
+    try {
+      const response = await fetch("/api/reviews/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          originalText: text,
+          scenario,
+          documentType,
+          recipientType,
+          submitter,
+          department,
+          mode,
+          sourceFileName: parsedDocument?.fileName,
+          sourceFileType: parsedDocument?.fileType
+        })
+      });
+      if (!response.ok) throw new Error("后端审查失败，已使用本地规则完成审查。");
+      const data = await response.json();
+      const review = data.review as DocumentReview;
+      setReviews((current) => [review, ...current.filter((item) => item.id !== review.id)]);
+      setSelectedId(review.id);
+      refreshAuditLogs();
+    } catch (apiError) {
+      const review = analyzeDocument({
+        title,
+        originalText: text,
+        scenario,
+        documentType,
+        recipientType,
+        submitter,
+        department,
+        mode,
+        knowledgeBase
+      });
+      review.sourceFileName = parsedDocument?.fileName;
+      review.sourceFileType = parsedDocument?.fileType;
+      setReviews((current) => [review, ...current]);
+      setSelectedId(review.id);
+      setError(apiError instanceof Error ? apiError.message : "后端审查失败，已使用本地规则完成审查。");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function handleFile(event: ChangeEvent<HTMLInputElement>) {
+  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    if (!file.name.endsWith(".txt")) {
-      setError("当前浏览器 MVP 可直接读取 .txt 文件；PDF/DOCX 已作为正式系统能力预留。");
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = () => {
+    setLoading(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch("/api/documents/parse", {
+        method: "POST",
+        body: form
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "文件解析失败。");
+      const document = data.document as ParsedDocument;
+      setParsedDocument(document);
       setTitle(file.name.replace(/\.[^.]+$/, ""));
-      setText(String(reader.result ?? ""));
+      setText(document.text);
       setError("");
-    };
-    reader.readAsText(file);
+      refreshAuditLogs();
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "文件解析失败。");
+    } finally {
+      setLoading(false);
+    }
   }
 
   function handleGenerateTraining() {
@@ -406,8 +484,8 @@ export function LeakLensApp() {
                   </div>
                   <label className="focus-ring inline-flex h-10 cursor-pointer items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-medium text-slate-700 hover:bg-white">
                     <Upload size={16} />
-                    上传 TXT
-                    <input className="hidden" type="file" accept=".txt" onChange={handleFile} />
+                    上传文件
+                    <input className="hidden" type="file" accept=".txt,.pdf,.docx,.xlsx,.xls,.pptx" onChange={handleFile} />
                   </label>
                 </div>
 
@@ -484,6 +562,30 @@ export function LeakLensApp() {
                   />
                 </label>
 
+                {parsedDocument && (
+                  <div className="mt-4 rounded-lg border border-line bg-panel p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-sm font-semibold">
+                        已解析：{parsedDocument.fileName} · {parsedDocument.fileType}
+                      </div>
+                      <span className="text-xs text-slate-500">{parsedDocument.blocks.length} 个文本块</span>
+                    </div>
+                    <div className="mt-3 grid max-h-44 gap-2 overflow-auto">
+                      {parsedDocument.blocks.slice(0, 8).map((block) => (
+                        <button
+                          key={block.id}
+                          type="button"
+                          onClick={() => setText(block.text)}
+                          className="focus-ring rounded-md border border-line bg-white p-3 text-left text-xs leading-5 text-slate-700 hover:border-brand"
+                        >
+                          <span className="font-semibold text-brand">{block.source}</span>
+                          <span className="ml-2">{block.text.slice(0, 160)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-4 flex flex-wrap items-center gap-2">
                   {sampleTexts.map((sample) => (
                     <button
@@ -518,10 +620,11 @@ export function LeakLensApp() {
                   <button
                     type="button"
                     onClick={handleAnalyze}
+                    disabled={loading}
                     className="focus-ring inline-flex h-11 items-center gap-2 rounded-md bg-brand px-5 text-sm font-semibold text-white hover:bg-[#185D58]"
                   >
                     <Sparkles size={17} />
-                    开始 AI 审查
+                    {loading ? "处理中..." : "开始 AI 审查"}
                   </button>
                 </div>
 
@@ -548,6 +651,9 @@ export function LeakLensApp() {
           )}
           {tab === "training" && <TrainingPanel reviews={reviews} onGenerate={handleGenerateTraining} selectedReview={selectedReview} />}
           {tab === "knowledge" && <KnowledgePanel items={knowledgeBase} onChange={setKnowledgeBase} />}
+          {tab === "import" && <ImportCenter onImported={(items) => setKnowledgeBase((current) => [...items, ...current])} onAuditRefresh={refreshAuditLogs} />}
+          {tab === "audit" && <AuditPanel logs={auditLogs} onRefresh={refreshAuditLogs} />}
+          {tab === "integrations" && <IntegrationPanel review={selectedReview} />}
         </main>
       </div>
     </div>
@@ -1108,10 +1214,10 @@ function KnowledgePanel({
     setSelectedTags((current) => (current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag]));
   }
 
-  function addItem() {
+  async function addItem() {
     if (!title.trim() || !content.trim()) return;
 
-    const next = createKnowledgeItem({
+    const payload = {
       type,
       title,
       source,
@@ -1121,13 +1227,35 @@ function KnowledgePanel({
         .map((item) => item.trim())
         .filter(Boolean),
       tags: selectedTags
-    });
+    };
 
-    onChange([next, ...items]);
+    try {
+      const response = await fetch("/api/knowledge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      onChange([data.item, ...items]);
+    } catch {
+      const next = createKnowledgeItem(payload);
+      onChange([next, ...items]);
+    }
   }
 
-  function toggleItem(id: string) {
-    onChange(items.map((item) => (item.id === id ? { ...item, enabled: !item.enabled, updatedAt: new Date().toISOString() } : item)));
+  async function toggleItem(id: string) {
+    const target = items.find((item) => item.id === id);
+    const nextEnabled = !target?.enabled;
+    onChange(items.map((item) => (item.id === id ? { ...item, enabled: nextEnabled, updatedAt: new Date().toISOString() } : item)));
+    try {
+      await fetch(`/api/knowledge/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: nextEnabled })
+      });
+    } catch {
+      // Local state remains useful for demo mode.
+    }
   }
 
   function removeItem(id: string) {
@@ -1281,6 +1409,186 @@ function KnowledgePanel({
             </div>
           ))}
         </div>
+      </div>
+    </section>
+  );
+}
+
+function ImportCenter({
+  onImported,
+  onAuditRefresh
+}: {
+  onImported: (items: KnowledgeItem[]) => void;
+  onAuditRefresh: () => void;
+}) {
+  const [items, setItems] = useState<KnowledgeItem[]>([]);
+  const [message, setMessage] = useState("支持 PDF、DOCX、Excel、PPTX、TXT 批量导入企业制度、合同、案例和法规。");
+  const [loading, setLoading] = useState(false);
+
+  async function handleImport(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []);
+    if (!files.length) return;
+
+    setLoading(true);
+    const form = new FormData();
+    files.forEach((file) => form.append("files", file));
+
+    try {
+      const response = await fetch("/api/import", {
+        method: "POST",
+        body: form
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "资料导入失败。");
+      setItems(data.imported ?? []);
+      onImported(data.imported ?? []);
+      onAuditRefresh();
+      setMessage(`已导入 ${data.imported?.length ?? 0} 条知识库资料。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "资料导入失败。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">资料导入中心</h2>
+          <p className="mt-1 text-sm text-slate-500">导入企业制度、合同/NDA、历史案例、法律法规，自动解析并写入知识库。</p>
+        </div>
+        <label className="focus-ring inline-flex h-10 cursor-pointer items-center gap-2 rounded-md bg-brand px-4 text-sm font-semibold text-white hover:bg-[#185D58]">
+          <Upload size={16} />
+          {loading ? "导入中..." : "批量导入"}
+          <input className="hidden" type="file" multiple accept=".txt,.pdf,.docx,.xlsx,.xls,.pptx" onChange={handleImport} />
+        </label>
+      </div>
+
+      <div className="mt-5 rounded-lg border border-line bg-panel p-4 text-sm text-slate-700">{message}</div>
+
+      <div className="mt-5 grid gap-3">
+        {items.map((item) => (
+          <div key={item.id} className="rounded-lg border border-line bg-white p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-semibold">{item.title}</div>
+              <span className="rounded bg-panel px-2.5 py-1 text-xs font-semibold text-slate-700">{item.type}</span>
+            </div>
+            <div className="mt-1 text-xs text-slate-500">{item.source}</div>
+            <p className="mt-3 line-clamp-3 text-sm leading-6 text-slate-700">{item.content}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AuditPanel({
+  logs,
+  onRefresh
+}: {
+  logs: Array<Record<string, unknown>>;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">审计日志</h2>
+          <p className="mt-1 text-sm text-slate-500">记录上传、审查、知识库修改、报告生成等关键动作。</p>
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="focus-ring h-10 rounded-md border border-line bg-panel px-4 text-sm font-semibold text-slate-700 hover:bg-white"
+        >
+          刷新日志
+        </button>
+      </div>
+      <div className="mt-5 grid gap-3">
+        {logs.length ? (
+          logs.map((log) => (
+            <div key={String(log.id)} className="rounded-lg border border-line bg-white p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="font-semibold">{String(log.action)}</div>
+                <span className="text-xs text-slate-500">{log.createdAt ? formatDate(String(log.createdAt)) : "刚刚"}</span>
+              </div>
+              <div className="mt-2 text-sm text-slate-600">
+                {String(log.actor ?? "演示用户")} · {String(log.role ?? "LEGAL")} · {String(log.target ?? "系统")}
+              </div>
+              {log.detail ? <pre className="mt-3 overflow-auto rounded-md bg-panel p-3 text-xs text-slate-600">{JSON.stringify(log.detail, null, 2)}</pre> : null}
+            </div>
+          ))
+        ) : (
+          <EmptyState />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function IntegrationPanel({ review }: { review?: DocumentReview }) {
+  const [feishuWebhook, setFeishuWebhook] = useState("");
+  const [wecomWebhook, setWecomWebhook] = useState("");
+  const [smtp, setSmtp] = useState("");
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const [payload, setPayload] = useState("");
+
+  async function generatePayload() {
+    if (!review) return;
+    const response = await fetch("/api/integrations/payload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        review,
+        feishuWebhook,
+        wecomWebhook,
+        smtp,
+        callbackUrl,
+        reportText: `${review.title} ${riskLevelLabel(review.riskLevel)} ${review.recommendation}`
+      })
+    });
+    const data = await response.json();
+    setPayload(JSON.stringify(data.payload, null, 2));
+  }
+
+  return (
+    <section className="grid gap-4 xl:grid-cols-[420px_1fr]">
+      <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+        <h2 className="text-lg font-semibold">系统集成配置</h2>
+        <p className="mt-1 text-sm text-slate-500">第一版生成审批系统 payload，不直接写入外部企业系统。</p>
+        <div className="mt-5 grid gap-4">
+          {[
+            ["飞书 Webhook", feishuWebhook, setFeishuWebhook],
+            ["企业微信 Webhook", wecomWebhook, setWecomWebhook],
+            ["邮件 SMTP", smtp, setSmtp],
+            ["审批回调 URL", callbackUrl, setCallbackUrl]
+          ].map(([label, value, setter]) => (
+            <label key={String(label)} className="grid gap-2 text-sm font-medium text-slate-700">
+              {String(label)}
+              <input
+                className="focus-ring h-11 rounded-md border border-line bg-white px-3 text-sm"
+                value={String(value)}
+                onChange={(event) => (setter as (value: string) => void)(event.target.value)}
+                placeholder="https://..."
+              />
+            </label>
+          ))}
+          <button
+            type="button"
+            onClick={generatePayload}
+            disabled={!review}
+            className="focus-ring h-11 rounded-md bg-brand px-4 text-sm font-semibold text-white hover:bg-[#185D58] disabled:bg-slate-300"
+          >
+            生成审批 Payload
+          </button>
+        </div>
+      </div>
+      <div className="rounded-lg border border-line bg-white/94 p-5 shadow-soft">
+        <h2 className="text-lg font-semibold">外部审批 Payload</h2>
+        <pre className="mt-4 min-h-[360px] overflow-auto rounded-lg bg-ink p-4 text-xs leading-6 text-white">
+          {payload || "选择一个审查记录后生成 payload。"}
+        </pre>
       </div>
     </section>
   );

@@ -408,6 +408,7 @@ export function analyzeDocument(params: {
     legalBasis: composeLegalBasis(citations),
     citations,
     recommendation: approval.suggestion,
+    modelStatus: "rule_fallback",
     sanitizedVersions: [sanitized],
     approvalRecords: [approval],
     remediationTasks,

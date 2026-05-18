@@ -1,0 +1,179 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  LEGAL
+  BUSINESS
+  APPROVER
+}
+
+model User {
+  id           String     @id @default(cuid())
+  name         String
+  email        String     @unique
+  role         UserRole   @default(BUSINESS)
+  department   String
+  passwordHash String?
+  createdAt    DateTime   @default(now())
+  reviews      Review[]
+  auditLogs    AuditLog[]
+}
+
+model Review {
+  id               String   @id
+  title            String
+  originalText     String
+  scenario         String
+  documentType     String
+  recipientType    String
+  submitter        String
+  department       String
+  riskLevel        String
+  score            Int
+  status           String
+  legalBasis       String
+  recommendation   String
+  summary          Json
+  modelStatus      String   @default("rule_fallback")
+  sourceFileName   String?
+  sourceFileType   String?
+  auditSerial      String?
+  createdAt        DateTime @default(now())
+  userId           String?
+  user             User?    @relation(fields: [userId], references: [id])
+  findings         RiskFinding[]
+  citations        Citation[]
+  sanitizedVersions SanitizedVersion[]
+  approvalRecords  ApprovalRecord[]
+  remediationTasks RemediationTask[]
+  trainingCases    TrainingCase[]
+}
+
+model RiskFinding {
+  id         String @id
+  snippet    String
+  tag        String
+  reason     String
+  legalBasis String
+  action     String
+  reviewId   String
+  review     Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model Citation {
+  id              String @id @default(cuid())
+  externalId      String
+  type            String
+  title           String
+  source          String
+  excerpt         String
+  matchedKeywords Json
+  tags            Json
+  reviewId        String
+  review          Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model SanitizedVersion {
+  id        String   @id
+  mode      String
+  text      String
+  changes   Json
+  createdAt DateTime @default(now())
+  reviewId  String
+  review    Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model ApprovalRecord {
+  id         String   @id
+  status     String
+  suggestion String
+  handler    String
+  createdAt  DateTime @default(now())
+  reviewId   String
+  review     Review   @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model RemediationTask {
+  id       String @id
+  owner    String
+  action   String
+  due      String
+  status   String
+  priority String
+  reviewId String
+  review   Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model TrainingCase {
+  id             String @id
+  type           String
+  question       String
+  options        Json?
+  answer         String
+  explanation    String
+  sourceReviewId String
+  review         Review @relation(fields: [sourceReviewId], references: [id], onDelete: Cascade)
+}
+
+model KnowledgeItem {
+  id          String   @id
+  type        String
+  title       String
+  source      String
+  content     String
+  keywords    Json
+  tags        Json
+  riskWeight  Int
+  enabled     Boolean  @default(true)
+  updatedAt   DateTime @updatedAt
+  chunks      KnowledgeChunk[]
+}
+
+model KnowledgeChunk {
+  id              String   @id @default(cuid())
+  knowledgeItemId String
+  chunkIndex       Int
+  content          String
+  keywords         Json
+  tags             Json
+  embedding        Json?
+  createdAt        DateTime @default(now())
+  knowledgeItem    KnowledgeItem @relation(fields: [knowledgeItemId], references: [id], onDelete: Cascade)
+}
+
+model ParsedDocument {
+  id        String   @id @default(cuid())
+  fileName  String
+  fileType  String
+  text      String
+  blocks    Json
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String
+  actor     String
+  role      String
+  target    String?
+  detail    Json?
+  createdAt DateTime @default(now())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+}
+
+model IntegrationSetting {
+  id        String   @id @default(cuid())
+  type      String
+  name      String
+  enabled   Boolean  @default(false)
+  config    Json
+  updatedAt DateTime @updatedAt
+}

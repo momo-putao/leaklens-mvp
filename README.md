@@ -19,8 +19,11 @@ LeakLens 是一个企业合规 SaaS 风格的 Web MVP，用于模拟员工外发
 - Next.js + TypeScript
 - Tailwind CSS
 - lucide-react
-- 浏览器 localStorage 模拟持久化
-- 本地规则引擎 + 简化知识库检索模拟结构化 AI/RAG 输出
+- Prisma + PostgreSQL schema
+- OpenAI 兼容模型接口
+- PDF/DOCX/Excel/PPTX/TXT 文件解析
+- 服务端 API + 内存 fallback
+- 本地规则引擎 + 知识库检索 fallback
 
 ## 知识库设计
 
@@ -48,15 +51,60 @@ LeakLens 不只看文本本身，还会结合：
 
 ```bash
 npm install
+npm run prisma:generate
 npm run dev
 ```
 
 打开 `http://localhost:3000` 查看应用。
 
-## 正式系统扩展方向
+## 本地企业版配置
 
-- 将本地规则引擎替换为大模型 API，保持 JSON 输出结构不变。
-- 使用 Prisma + PostgreSQL 存储审查、发现项、脱敏版本、审批记录和培训题。
-- 使用向量数据库存储企业制度、合同条款、历史案例和法律法规，升级为真正的 RAG 检索。
-- 增加 PDF/DOCX 服务端文本抽取。
-- 增加企业账号、角色权限、审计日志和私有化部署能力。
+复制环境变量示例：
+
+```bash
+cp .env.example .env
+```
+
+如果需要启用 PostgreSQL/Prisma 持久化：
+
+```bash
+# .env
+DATABASE_URL="postgresql://leaklens:leaklens@localhost:5432/leaklens?schema=public"
+LEAKLENS_USE_DATABASE="true"
+```
+
+然后执行：
+
+```bash
+npm run prisma:migrate
+```
+
+如果 `LEAKLENS_USE_DATABASE` 不是 `true`，系统会使用服务端内存 fallback，方便本地演示。
+
+如果需要启用真实大模型：
+
+```bash
+OPENAI_API_KEY="你的 key"
+OPENAI_BASE_URL="https://api.openai.com/v1"
+OPENAI_MODEL="gpt-4o-mini"
+```
+
+也可以把 `OPENAI_BASE_URL` 换成兼容 OpenAI 协议的其他模型服务。没有 API Key 或模型返回异常时，系统会自动降级到本地规则审查。
+
+## 企业版能力
+
+- API 化审查：`/api/reviews/analyze`
+- 文件解析：`/api/documents/parse`
+- 知识库管理：`/api/knowledge`
+- 企业资料导入：`/api/import`
+- 审计日志：`/api/audit`
+- 审批 payload：`/api/integrations/payload`
+- Prisma 数据模型：用户、角色、审计日志、审查记录、风险发现、引用依据、整改任务、培训题、知识库、文档切片、集成配置。
+
+## 后续扩展方向
+
+- 接入 pgvector 或独立向量数据库，实现真正 embedding RAG。
+- 将本地账号升级为 NextAuth/Auth.js 登录。
+- 将审批 payload 实际发送至飞书、企微、邮件或企业审批系统。
+- 增加对象存储保存原始文件。
+- 增加更严格的租户隔离、加密、审计报表和导出水印。
