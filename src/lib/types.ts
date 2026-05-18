@@ -1,0 +1,73 @@
+export type RiskLevel = "low" | "medium" | "high";
+
+export type ReviewScenario =
+  | "员工外发"
+  | "宣传内容"
+  | "客户沟通"
+  | "供应商沟通"
+  | "内部报告";
+
+export type RiskTag =
+  | "客户信息"
+  | "报价策略"
+  | "技术方案"
+  | "经营数据"
+  | "供应商信息"
+  | "未公开商业计划";
+
+export type RewriteMode = "保守脱敏" | "平衡表达" | "保留商务语气";
+
+export type RiskFinding = {
+  id: string;
+  snippet: string;
+  tag: RiskTag;
+  reason: string;
+  legalBasis: string;
+  action: string;
+};
+
+export type SanitizedVersion = {
+  id: string;
+  mode: RewriteMode;
+  text: string;
+  changes: string[];
+  createdAt: string;
+};
+
+export type ApprovalRecord = {
+  id: string;
+  status: "自动通过" | "法务复核" | "禁止外发";
+  suggestion: string;
+  handler: string;
+  createdAt: string;
+};
+
+export type TrainingCase = {
+  id: string;
+  type: "选择题" | "判断题" | "案例分析题";
+  question: string;
+  options?: string[];
+  answer: string;
+  explanation: string;
+  sourceReviewId: string;
+};
+
+export type DocumentReview = {
+  id: string;
+  title: string;
+  originalText: string;
+  scenario: ReviewScenario;
+  submitter: string;
+  department: string;
+  riskLevel: RiskLevel;
+  score: number;
+  status: "待处理" | "已通过" | "待复核" | "已拦截";
+  tags: RiskTag[];
+  findings: RiskFinding[];
+  legalBasis: string;
+  recommendation: string;
+  sanitizedVersions: SanitizedVersion[];
+  approvalRecords: ApprovalRecord[];
+  trainingCases: TrainingCase[];
+  createdAt: string;
+};
