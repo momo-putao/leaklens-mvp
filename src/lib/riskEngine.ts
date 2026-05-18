@@ -1,6 +1,8 @@
 import {
   ApprovalRecord,
   DocumentReview,
+  KnowledgeItem,
+  LegalCitation,
   RewriteMode,
   RiskFinding,
   RiskLevel,
@@ -138,6 +140,53 @@ function approvalForLevel(level: RiskLevel): ApprovalRecord {
   };
 }
 
+function retrieveCitations(text: string, tags: RiskTag[], knowledgeBase: KnowledgeItem[]): LegalCitation[] {
+  return knowledgeBase
+    .filter((item) => item.enabled)
+    .map((item) => {
+      const matchedKeywords = item.keywords.filter((keyword) => text.includes(keyword));
+      const tagHits = item.tags.filter((tag) => tags.includes(tag));
+      const score = matchedKeywords.length * 2 + tagHits.length;
+
+      return { item, matchedKeywords, score };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map(({ item, matchedKeywords }) => ({
+      id: item.id,
+      type: item.type,
+      title: item.title,
+      source: item.source,
+      excerpt: item.content,
+      matchedKeywords,
+      tags: item.tags
+    }));
+}
+
+function composeLegalBasis(citations: LegalCitation[]) {
+  if (!citations.length) return legalBasis;
+
+  const legal = citations.find((item) => item.type === "法律法规");
+  const policy = citations.find((item) => item.type === "企业制度");
+  const contract = citations.find((item) => item.type === "合同条款");
+
+  const parts = [
+    legal ? `法律依据参考 ${legal.title}，该材料需判断秘密性、商业价值和保密措施。` : legalBasis,
+    policy ? `企业制度命中 ${policy.title}，外发前应适用最小必要披露和审批留痕。` : "",
+    contract ? `合同条款命中 ${contract.title}，需确认接收方、披露目的和书面授权范围。` : ""
+  ].filter(Boolean);
+
+  return parts.join("");
+}
+
+function citationScore(citations: LegalCitation[], knowledgeBase: KnowledgeItem[]) {
+  return citations.reduce((sum, citation) => {
+    const source = knowledgeBase.find((item) => item.id === citation.id);
+    return sum + Math.min(10, source?.riskWeight ?? 3);
+  }, 0);
+}
+
 function createFindings(text: string): RiskFinding[] {
   return rules.flatMap((rule) => {
     const hit = rule.keywords.find((keyword) => text.includes(keyword));
@@ -207,15 +256,18 @@ export function analyzeDocument(params: {
   submitter: string;
   department: string;
   mode: RewriteMode;
+  knowledgeBase?: KnowledgeItem[];
 }): DocumentReview {
   const findings = createFindings(params.originalText);
   const tags = Array.from(new Set(findings.map((finding) => finding.tag)));
+  const knowledgeBase = params.knowledgeBase ?? [];
+  const citations = retrieveCitations(params.originalText, tags, knowledgeBase);
   const baseScore = findings.reduce((sum, finding) => {
     const rule = rules.find((item) => item.tag === finding.tag);
     return sum + (rule?.weight ?? 10);
   }, 0);
   const scenarioBonus = params.scenario === "员工外发" || params.scenario === "客户沟通" ? 8 : 4;
-  const score = Math.min(100, findings.length ? baseScore + scenarioBonus + findings.length * 4 : 12);
+  const score = Math.min(100, findings.length ? baseScore + scenarioBonus + findings.length * 4 + citationScore(citations, knowledgeBase) : 12);
   const riskLevel = levelFromScore(score);
   const approval = approvalForLevel(riskLevel);
   const sanitized = sanitize(params.originalText, params.mode, findings);
@@ -235,7 +287,8 @@ export function analyzeDocument(params: {
     status,
     tags,
     findings,
-    legalBasis,
+    legalBasis: composeLegalBasis(citations),
+    citations,
     recommendation: approval.suggestion,
     sanitizedVersions: [sanitized],
     approvalRecords: [approval],

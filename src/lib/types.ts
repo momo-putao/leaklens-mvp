@@ -17,6 +17,31 @@ export type RiskTag =
 
 export type RewriteMode = "保守脱敏" | "平衡表达" | "保留商务语气";
 
+export type KnowledgeType = "法律法规" | "企业制度" | "历史案例" | "合同条款" | "标签规则";
+
+export type KnowledgeItem = {
+  id: string;
+  type: KnowledgeType;
+  title: string;
+  source: string;
+  content: string;
+  keywords: string[];
+  tags: RiskTag[];
+  riskWeight: number;
+  enabled: boolean;
+  updatedAt: string;
+};
+
+export type LegalCitation = {
+  id: string;
+  type: KnowledgeType;
+  title: string;
+  source: string;
+  excerpt: string;
+  matchedKeywords: string[];
+  tags: RiskTag[];
+};
+
 export type RiskFinding = {
   id: string;
   snippet: string;
@@ -65,6 +90,7 @@ export type DocumentReview = {
   tags: RiskTag[];
   findings: RiskFinding[];
   legalBasis: string;
+  citations: LegalCitation[];
   recommendation: string;
   sanitizedVersions: SanitizedVersion[];
   approvalRecords: ApprovalRecord[];
